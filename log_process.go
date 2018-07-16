@@ -6,6 +6,20 @@ import (
    "time"
 )
 
+//为了可扩展性  定义两个读写接口
+
+//读取的接口
+type Reader interface {
+    //定义个方法
+    Read(rc chan string)
+}
+
+//写入的接口
+type Writer interface {
+    //定义个方法
+    Write(wc chan string)
+}
+
 type logprocess struct {
 
    //channels进行通信
@@ -13,22 +27,25 @@ type logprocess struct {
    wc chan string
 
    //要读取日志的路径和influxdb的用户名、密码
-   path string
-   influxdb string
+   read  Reader
+   write Writer
 
 }
 
 
 //1.日志读取
 //使用l指针变量（也就是这个地址所指向的值）
-func (l *logprocess) ReadLog()  {
-
-    line := "Afe"
-
-    l.rc <- line
-
+//文件路径结构体
+type ReadFilePath struct {
+    path string
 }
 
+func (r *ReadFilePath) Read(rc chan string)  {
+
+    line := "Afe"
+    rc <- line
+
+}
 
 //2.解析
 func (l *logprocess)  Process() {
@@ -40,31 +57,41 @@ func (l *logprocess)  Process() {
 
 }
 
-
+//写入结构体
+type WriteDb struct {
+    db string
+}
 //3.写入influxdb中
-func (l *logprocess)  WriteInfluxdb() {
+func (w *WriteDb)  Write(wc chan string) {
 
    //输出
-   fmt.Printf( <- l.wc)
+   fmt.Printf( <- wc)
 
 }
 
 func main() {
+
+    r  := &ReadFilePath{
+        path :"./access.log",
+    }
+
+    w  := &WriteDb{
+        db :"username=liuli&password=liuli",
+    }
 
     lp := &logprocess{
 
        //使用make来
        rc: make(chan string),
        wc: make(chan string),
-
-       path: "./access.log",
-       influxdb: "username=liuli&password=123",
+       read:  r,
+       write: w,
 
     }
 
-    go lp.ReadLog()
+    go lp.read.Read(lp.rc)
     go lp.Process()
-    go lp.WriteInfluxdb()
+    go lp.write.Write(lp.wc)
 
     //创建goroutine完后程序就自动退出  并不会等待
     time.Sleep(time.Second * 1)
