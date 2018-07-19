@@ -4,6 +4,10 @@ import (
    "fmt"
    "strings"
    "time"
+	"os"
+	"log"
+    "bufio"
+    "io"
 )
 
 //为了可扩展性  定义两个读写接口
@@ -11,7 +15,7 @@ import (
 //读取的接口
 type Reader interface {
     //定义个方法
-    Read(rc chan string)
+    Read(rc chan []byte)
 }
 
 //写入的接口
@@ -23,7 +27,7 @@ type Writer interface {
 type logprocess struct {
 
    //channels进行通信
-   rc chan string
+   rc chan []byte
    wc chan string
 
    //要读取日志的路径和influxdb的用户名、密码
@@ -40,10 +44,35 @@ type ReadFilePath struct {
     path string
 }
 
-func (r *ReadFilePath) Read(rc chan string)  {
+//写入配置结构体
+type WriteDb struct {
+	db string
+}
 
-    line := "Afe"
-    rc <- line
+func (r *ReadFilePath) Read(rc chan []byte)  {
+
+   f,err := os.Open(r.path)
+
+   if err != nil {
+       log.Println("Open file failed:", err)
+   }
+   //从文件末尾开始从行读取
+   f.Seek(0,2)
+   rd := bufio.NewReader(f)
+   //读取文件每一行
+   line,err := rd.ReadBytes('\n')
+   if err ==io.EOF {
+       time.Sleep(500 * time.Millisecond)
+   } else if err != nil {
+        panic(fmt.Sprintf("ReadBytes error:%s", err.Error()))
+   }
+
+   rc <- line
+
+
+
+   defer f.Close()
+
 
 }
 
@@ -53,17 +82,12 @@ func (l *logprocess)  Process() {
     data := <-l.rc
 
     //先进行个大写转换
-    l.wc <- strings.ToUpper(data)
+    l.wc <- strings.ToUpper(string(data))
 
 }
 
-//写入结构体
-type WriteDb struct {
-    db string
-}
 //3.写入influxdb中
 func (w *WriteDb)  Write(wc chan string) {
-
    //输出
    fmt.Printf( <- wc)
 
@@ -72,7 +96,7 @@ func (w *WriteDb)  Write(wc chan string) {
 func main() {
 
     r  := &ReadFilePath{
-        path :"./access.log",
+        path :"access.log",
     }
 
     w  := &WriteDb{
@@ -82,7 +106,7 @@ func main() {
     lp := &logprocess{
 
        //使用make来
-       rc: make(chan string),
+       rc: make(chan []byte),
        wc: make(chan string),
        read:  r,
        write: w,
