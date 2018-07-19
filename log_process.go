@@ -59,19 +59,23 @@ func (r *ReadFilePath) Read(rc chan []byte)  {
    //从文件末尾开始从行读取
    f.Seek(0,2)
    rd := bufio.NewReader(f)
-   //读取文件每一行
-   line,err := rd.ReadBytes('\n')
-   if err ==io.EOF {
-       time.Sleep(500 * time.Millisecond)
-   } else if err != nil {
-        panic(fmt.Sprintf("ReadBytes error:%s", err.Error()))
+
+   for {
+       //读取文件每一行
+       line,err := rd.ReadBytes('\n')
+       if err == io.EOF {
+           time.Sleep(500 * time.Millisecond)
+           continue
+       } else if err != nil {
+           panic(fmt.Sprintf("ReadBytes error:%s", err.Error()))
+       }
+
+       rc <- line
+
    }
 
-   rc <- line
 
 
-
-   defer f.Close()
 
 
 }
@@ -79,24 +83,27 @@ func (r *ReadFilePath) Read(rc chan []byte)  {
 //2.解析
 func (l *logprocess)  Process() {
 
-    data := <-l.rc
+    for v := range l.rc {
+        //先进行个大写转换
+        l.wc <- strings.ToUpper(string(v))
+    }
 
-    //先进行个大写转换
-    l.wc <- strings.ToUpper(string(data))
 
 }
 
 //3.写入influxdb中
 func (w *WriteDb)  Write(wc chan string) {
    //输出
-   fmt.Printf( <- wc)
+   for v := range wc {
+       fmt.Printf(v)
+   }
 
 }
 
 func main() {
 
     r  := &ReadFilePath{
-        path :"access.log",
+        path :"./access.log",
     }
 
     w  := &WriteDb{
@@ -118,7 +125,7 @@ func main() {
     go lp.write.Write(lp.wc)
 
     //创建goroutine完后程序就自动退出  并不会等待
-    time.Sleep(time.Second * 1)
+    time.Sleep(time.Second * 30)
 
 
 
