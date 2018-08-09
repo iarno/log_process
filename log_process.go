@@ -303,10 +303,6 @@ func main() {
     }
 
     go lp.read.Read(lp.rc)
-    go lp.Process()
-    go lp.write.Write(lp.wc)
-
-    //创建goroutine完后程序就自动退出  并不会等待
     for i := 0; i < 2; i++ {
         go lp.Process()
     }
