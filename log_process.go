@@ -11,10 +11,15 @@ import (
     "strconv"
     "strings"
     "net/url"
+
+    "github.com/influxdata/influxdb/client/v2"
+
+    "flag"
+    "net/http"
+    "encoding/json"
 )
 
 //为了可扩展性  定义两个读写接口
-
 //读取的接口
 type Reader interface {
     //定义个方法
@@ -58,6 +63,70 @@ type WriteDb struct {
 	db string
 }
 
+// 系统状态监控
+type SystemInfo struct {
+    HandleLine   int     `json:"handleLine"`   // 总处理日志行数
+    Tps          float64 `json:"tps"`          // 系统吞出量
+    ReadChanLen  int     `json:"readChanLen"`  // read channel 长度
+    WriteChanLen int     `json:"writeChanLen"` // write channel 长度
+    RunTime      string  `json:"runTime"`      // 运行总时间
+    ErrNum       int     `json:"errNum"`       // 错误数
+}
+
+const (
+    TypeHandleLine = 0
+    TypeErrNum     = 1
+)
+
+var TypeMonitorChan = make(chan int, 200)
+
+type Monitor struct {
+    startTime time.Time
+    data      SystemInfo
+    tpsSli    []int
+}
+
+func (m *Monitor) start(lp *logprocess) {
+
+    go func() {
+        for n := range TypeMonitorChan {
+            switch n {
+            case TypeErrNum:
+                m.data.ErrNum += 1
+            case TypeHandleLine:
+                m.data.HandleLine += 1
+            }
+        }
+    }()
+
+    ticker := time.NewTicker(time.Second * 5)
+    go func() {
+        for {
+            <-ticker.C
+            m.tpsSli = append(m.tpsSli, m.data.HandleLine)
+            if len(m.tpsSli) > 2 {
+                m.tpsSli = m.tpsSli[1:]
+            }
+        }
+    }()
+
+    http.HandleFunc("/monitor", func(writer http.ResponseWriter, request *http.Request) {
+        m.data.RunTime = time.Now().Sub(m.startTime).String()
+        m.data.ReadChanLen = len(lp.rc)
+        m.data.WriteChanLen = len(lp.wc)
+
+        if len(m.tpsSli) >= 2 {
+            m.data.Tps = float64(m.tpsSli[1]-m.tpsSli[0]) / 5
+        }
+
+        ret, _ := json.MarshalIndent(m.data, "", "\t")
+        io.WriteString(writer, string(ret))
+    })
+
+    http.ListenAndServe(":9193", nil)
+}
+
+
 func (r *ReadFilePath) Read(rc chan []byte)  {
 
    f,err := os.Open(r.path)
@@ -78,13 +147,10 @@ func (r *ReadFilePath) Read(rc chan []byte)  {
        } else if err != nil {
            panic(fmt.Sprintf("ReadBytes error:%s", err.Error()))
        }
-
+       TypeMonitorChan <- TypeHandleLine
        rc <- line
 
    }
-
-
-
 
 
 }
@@ -118,6 +184,7 @@ func (l *logprocess)  Process() {
 
         if err != nil {
            log.Println("ParseInLocation fail:", err.Error(), ret[4])
+           TypeMonitorChan <- TypeErrNum
            continue
         }
 
@@ -128,6 +195,7 @@ func (l *logprocess)  Process() {
         // GET /foo?query=t HTTP/1.0
         reqSli := strings.Split(ret[6], " ")
         if len(reqSli) != 3 {
+            TypeMonitorChan <- TypeErrNum
             log.Println("strings.Split fail", ret[6])
             continue
         }
@@ -136,6 +204,7 @@ func (l *logprocess)  Process() {
         u, err := url.Parse(reqSli[1])
         if err != nil {
             log.Println("url parse fail:", err)
+            TypeMonitorChan <- TypeErrNum
             continue
         }
         message.Path = u.Path
@@ -157,21 +226,70 @@ func (l *logprocess)  Process() {
 
 //3.写入influxdb中
 func (w *WriteDb)  Write(wc chan *Message) {
-   //输出
-   for v := range wc {
-       fmt.Println(v)
-   }
+
+    // 写入模块
+
+    infSli := strings.Split(w.db, "@")
+
+    // Create a new HTTPClient
+    c, err := client.NewHTTPClient(client.HTTPConfig{
+        Addr:     infSli[0],
+        Username: infSli[1],
+        Password: infSli[2],
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for v := range wc {
+        // Create a new point batch
+        bp, err := client.NewBatchPoints(client.BatchPointsConfig{
+            Database:  infSli[3],
+            Precision: infSli[4],
+        })
+        if err != nil {
+            log.Fatal(err)
+        }
+
+        // Create a point and add to batch
+        // Tags: Path, Method, Scheme, Status
+        tags := map[string]string{"Path": v.Path, "Method": v.Method, "Scheme": v.Scheme, "Status": v.Status}
+        // Fields: UpstreamTime, RequestTime, BytesSent
+        fields := map[string]interface{}{
+            "UpstreamTime": v.UpstreamTime,
+            "RequestTime":  v.RequestTime,
+            "BytesSent":    v.BytesSent,
+        }
+
+        pt, err := client.NewPoint("mydb", tags, fields, v.TimeLocal)
+        if err != nil {
+            log.Fatal(err)
+        }
+        bp.AddPoint(pt)
+
+        // Write the batch
+        log.Println(bp)
+        if err := c.Write(bp); err != nil {
+            log.Fatal(err)
+        }
+
+        log.Println("write success!")
+    }
 
 }
 
 func main() {
+    var path, influxDsn string
+    flag.StringVar(&path, "path", "./access.log", "read file path")
+    flag.StringVar(&influxDsn, "influxDsn", "http://127.0.0.1:8086@liuli@liuli@mydb@s", "influx data source")
+    flag.Parse()
 
     r  := &ReadFilePath{
-        path :"./access.log",
+        path : path,
     }
 
     w  := &WriteDb{
-        db :"username=liuli&password=liuli",
+        db : influxDsn,
     }
 
     lp := &logprocess{
@@ -189,7 +307,19 @@ func main() {
     go lp.write.Write(lp.wc)
 
     //创建goroutine完后程序就自动退出  并不会等待
-    time.Sleep(time.Second * 30)
+    for i := 0; i < 2; i++ {
+        go lp.Process()
+    }
+
+    for i := 0; i < 4; i++ {
+        go lp.write.Write(lp.wc)
+    }
+
+    m := &Monitor{
+        startTime: time.Now(),
+        data:      SystemInfo{},
+    }
+    m.start(lp)
 
 
 
